@@ -1,118 +1,126 @@
 import csv
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
-import collections
 
-# Thresholds and Scores
 ALERT_THRESHOLD = 4
+
 SCORES = {
     "RAPID_ATTEMPTS": 3,
     "CONSECUTIVE_FAILURES": 2,
     "FOREIGN_IP": 2,
     "OUTSIDE_TOKYO": 1,
-    "ABNORMAL_TIME": 1
+    "ABNORMAL_TIME": 1,
 }
 
-def is_tokyo(ip):
-    return ip.startswith("126.")
+IP_LOCATIONS = {
+    "133.12.45.1": "Tokyo",
+    "133.12.45.2": "Tokyo",
+    "192.168.1.1": "Japan",
+    "85.214.132.117": "Germany",
+}
 
-def is_japan(ip):
-    return ip.startswith("126.") or ip.startswith("133.")
 
-def get_time_score(timestamp):
-    dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+def check_time(dt):
+    """Return score if login occurs between 1AM and 5AM."""
     if 1 <= dt.hour <= 5:
-        return SCORES["ABNORMAL_TIME"]
-    return 0
+        return SCORES["ABNORMAL_TIME"], "Abnormal login time"
+    return 0, None
 
-def get_location_score(ip):
-    if not is_japan(ip):
-        return SCORES["FOREIGN_IP"]
-    if not is_tokyo(ip):
-        return SCORES["OUTSIDE_TOKYO"]
-    return 0
+
+def check_location(ip):
+    """Check login location using simplified Geo-IP database."""
+    location = IP_LOCATIONS.get(ip, "Unknown")
+    if location == "Tokyo":
+        return 0, None
+    elif location == "Japan":
+        return SCORES["OUTSIDE_TOKYO"], "Outside Tokyo"
+    return SCORES["FOREIGN_IP"], f"Foreign IP ({location})"
+
+
+def check_attempt_rate(window, dt):
+    """Detect 10+ attempts within one minute."""
+    attempts = sum(1 for t, _ in window if dt - t <= timedelta(minutes=1))
+    if attempts >= 10:
+        return SCORES["RAPID_ATTEMPTS"], "10+ attempts within 1 minute"
+    return 0, None
+
+
+def check_consecutive_failures(window):
+    """Detect 5 consecutive failed logins."""
+    consecutive = 0
+    for _, status in reversed(window):
+        if status == "Failure":
+            consecutive += 1
+            if consecutive >= 5:
+                return SCORES["CONSECUTIVE_FAILURES"], "5 consecutive failures"
+        else:
+            break
+    return 0, None
+
 
 def analyze_logs(file_path):
+    alerts = []
+    user_logs = defaultdict(list)
+
     with open(file_path, "r") as f:
         reader = csv.DictReader(f)
-        logs = list(reader)
-
-    alerts = []
-    
-    # User-based tracking
-    user_logs = collections.defaultdict(list)
-    for log in logs:
-        user_logs[log["Username"]].append(log)
+        for row in reader:
+            row["Timestamp"] = datetime.strptime(row["Timestamp"], "%Y-%m-%d %H:%M:%S")
+            user_logs[row["Username"]].append(row)
 
     for username, entries in user_logs.items():
-        for i, entry in enumerate(entries):
-            score = 0
-            reasons = []
-            
-            # 1. Time Check
-            t_score = get_time_score(entry["Timestamp"])
-            if t_score > 0:
-                score += t_score
-                reasons.append(f"Abnormal time ({entry['Timestamp']})")
+        entries.sort(key=lambda x: x["Timestamp"])
+        recent_window = deque()
 
-            # 2. Location Check
-            l_score = get_location_score(entry["IP_Address"])
-            if l_score > 0:
-                score += l_score
-                reasons.append(f"Suspicious location ({entry['IP_Address']})")
+        for entry in entries:
+            dt = entry["Timestamp"]
+            score, reasons = 0, []
 
-            # 3. Consecutive Failures (5 within 5 mins)
-            current_time = datetime.strptime(entry["Timestamp"], "%Y-%m-%d %H:%M:%S")
-            recent_failures = 0
-            for j in range(i, -1, -1):
-                prev_entry = entries[j]
-                prev_time = datetime.strptime(prev_entry["Timestamp"], "%Y-%m-%d %H:%M:%S")
-                if current_time - prev_time > timedelta(minutes=5):
-                    break
-                if prev_entry["Status"] == "Failure":
-                    recent_failures += 1
-            
-            if recent_failures >= 5:
-                score += SCORES["CONSECUTIVE_FAILURES"]
-                reasons.append(f"5+ consecutive failures within 5 mins")
+            recent_window.append((dt, entry["Status"]))
+            while recent_window and dt - recent_window[0][0] > timedelta(minutes=5):
+                recent_window.popleft()
 
-            # 4. Rapid Attempts (10+ per minute)
-            recent_attempts = 0
-            for j in range(i, -1, -1):
-                prev_entry = entries[j]
-                prev_time = datetime.strptime(prev_entry["Timestamp"], "%Y-%m-%d %H:%M:%S")
-                if current_time - prev_time > timedelta(minutes=1):
-                    break
-                recent_attempts += 1
-            
-            if recent_attempts >= 10:
-                score += SCORES["RAPID_ATTEMPTS"]
-                reasons.append(f"10+ attempts within 1 minute")
+            # Rule checks
+            for check_func, args in [
+                (check_time, (dt,)),
+                (check_location, (entry["IP_Address"],)),
+                (check_attempt_rate, (recent_window, dt)),
+                (check_consecutive_failures, (recent_window,)),
+            ]:
+                s, r = check_func(*args)
+                score += s
+                if r:
+                    reasons.append(r)
 
             if score >= ALERT_THRESHOLD:
                 alerts.append({
-                    "Timestamp": entry["Timestamp"],
+                    "Timestamp": dt.strftime("%Y-%m-%d %H:%M:%S"),
                     "Username": username,
                     "IP": entry["IP_Address"],
                     "Score": score,
-                    "Reasons": ", ".join(reasons)
+                    "Reasons": ", ".join(reasons),
                 })
 
     return alerts
 
+
 def main():
     log_file = "../data/login_logs.csv"
-    print(f"Analyzing {log_file}...")
+    print(f"Analyzing {log_file}...\n")
     alerts = analyze_logs(log_file)
-    
+
     if not alerts:
         print("No anomalies detected.")
-    else:
-        print(f"Detected {len(alerts)} potential anomalies:")
-        print("-" * 80)
-        print(f"{'Timestamp':<20} | {'User':<12} | {'Score':<5} | {'Reasons'}")
-        print("-" * 80)
-        for alert in alerts:
-            print(f"{alert['Timestamp']:<20} | {alert['Username']:<12} | {alert['Score']:<5} | {alert['Reasons']}")
+        return
+
+    print(f"Detected {len(alerts)} potential anomalies\n")
+    print("-" * 95)
+    print(f"{'Timestamp':<20} | {'User':<10} | {'Score':<5} | Reasons")
+    print("-" * 95)
+
+    for alert in alerts:
+        print(f"{alert['Timestamp']:<20} | {alert['Username']:<10} | {alert['Score']:<5} | {alert['Reasons']}")
+
 
 if __name__ == "__main__":
     main()
