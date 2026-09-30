@@ -33,3 +33,10 @@ All events are generated locally. No accounts, networks, or real IP reputation s
 ## Limitations
 
 This is not a production IDS. It uses toy thresholds, synthetic users, and simplified IP/location behavior. The purpose is to practice experimental design and defensive reasoning.
+## Project reflection
+
+- **What I personally implemented:** I wrote the synthetic scenario generator, sliding-window login analysis, failure counting, risk-score rules, alert output, benchmark, and unit tests.
+- **One actual result:** The published tests all passed (**3/3**); the detector generated **3 alerts for the rapid brute-force scenario** but **0 alerts for the deliberately slow-evasion scenario**.
+- **One unexpected result:** The password-spraying scenario produced **0 alerts**, because the current detector groups events by username and does not yet reason about one source attacking multiple accounts.
+- **One limitation:** The implementation cannot establish production detection quality because it uses synthetic logs, toy thresholds, and a simplified allowlist for source IPs.
+- **Next iteration:** I intend to add source-level and cross-account analysis, then sweep the alert threshold to measure the trade-off between detection and false alarms.
